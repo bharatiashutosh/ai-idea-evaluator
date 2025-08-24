@@ -289,7 +289,8 @@ def main():
             with colA:
                 st.metric("Total Ideas", len(df))
             with colB:
-                st.metric("Avg Weighted Score", f"{round(df['weighted_score'].mean(),1)}%")
+                avg_ws = round(df["weighted_score"].mean(), 1)
+                st.metric("Avg Weighted Score", f"{avg_ws}%")
             with colC:
                 st.metric("Go", int((df["recommendation"]=="Go").sum()))
             with colD:
@@ -312,8 +313,8 @@ def main():
                 "summary": "Summary",
             })
 
-            # Add percent column
-            show_df["Weighted %"] = show_df["Weighted Score"].round().astype(int)
+            # Add a clean percent text column so it always renders like '72%'
+            show_df["Weighted %"] = show_df["Weighted Score"].round().astype(int).astype(str) + "%"
 
             st.caption("Legend: ✅ Go   ✏️ Revise   ⛔ No-Go")
 
@@ -332,7 +333,8 @@ def main():
                     "Weighted Score": st.column_config.ProgressColumn(
                         "Weighted Score", min_value=0, max_value=100
                     ),
-                    "Weighted %": st.column_config.NumberColumn(format="%d%%"),
+                    # Weighted % shown as plain text to avoid any auto-scaling quirks
+                    "Weighted %": st.column_config.TextColumn("Weighted %"),
                     "AI Rec": st.column_config.TextColumn("AI Rec"),
                     "Summary": st.column_config.TextColumn("Summary", width="large"),
                 }
