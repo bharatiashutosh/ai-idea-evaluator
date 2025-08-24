@@ -331,10 +331,13 @@ def main():
                     "Cost (1-5 high=bad)": st.column_config.NumberColumn(format="%.0f", help="1–5 (lower=better)"),
                     "Risk (1-5 high=bad)": st.column_config.NumberColumn(format="%.0f", help="1–5 (lower=better)"),
                     "Weighted Score": st.column_config.ProgressColumn(
-                        "Weighted Score",
-                        help="0–100 (higher=better)",
-                        min_value=0, max_value=100
-                    ),
+                      "Weighted Score": st.column_config.ProgressColumn(
+    "Weighted Score",
+    help="0–100 (higher=better)",
+    min_value=0, max_value=100,
+    format="%d%%"
+),
+
                     "AI Rec": st.column_config.TextColumn(
                         "AI Rec",
                         help="Go / Revise / No-Go"
