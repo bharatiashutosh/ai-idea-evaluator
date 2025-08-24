@@ -221,27 +221,52 @@ def main():
                     "weighted_score": weighted
                 }
                 insert_record(conn, record)
-                st.success("Idea evaluated and saved.")
-                with st.expander("View AI output"):
-                    st.json({
-                        "scores": {
-                            "feasibility": feasibility,
-                            "cost": cost,
-                            "impact": impact,
-                            "risk": risk,
-                            "weighted_score": weighted
-                        },
-                        "confidence": confidence,
-                        "recommendation": recommendation,
-                        "summary": summary,
-                        "rationales": {
-                            "feasibility": r_feas,
-                            "cost": r_cost,
-                            "impact": r_imp,
-                            "risk": r_risk
-                        },
-                        "assumptions": assumptions
-                    })
+          st.success("Idea evaluated and saved.")
+
+# --- Pretty result summary ---
+rec_color = {"Go": "green", "Revise": "orange", "No-Go": "red"}.get(recommendation, "gray")
+rec_emoji = {"Go": "✅", "Revise": "✏️", "No-Go": "⛔"}.get(recommendation, "ℹ️")
+
+st.markdown(f"### {rec_emoji} Recommendation: <span style='color:{rec_color}'>{recommendation}</span>", unsafe_allow_html=True)
+st.write(summary)
+
+colA, colB, colC = st.columns(3)
+with colA:
+    st.metric("Weighted Score", weighted)
+with colB:
+    st.metric("Confidence", f"{confidence}%")
+with colC:
+    st.metric("Risk (1–5, lower better)", risk)
+
+# Score bars
+st.markdown("#### Scores")
+sb1, sb2 = st.columns(2)
+with sb1:
+    st.write("Feasibility")
+    st.progress(feasibility/5.0)
+    st.write("Impact")
+    st.progress(impact/5.0)
+with sb2:
+    st.write("Cost (lower is better)")
+    st.progress((6-cost)/5.0)  # inverted so higher bar = better
+    st.write("Risk (lower is better)")
+    st.progress((6-risk)/5.0)  # inverted
+
+# Rationales in tabs
+tab1, tab2, tab3, tab4 = st.tabs(["Feasibility", "Cost", "Impact", "Risk"])
+with tab1:
+    st.write(r_feas or "-")
+with tab2:
+    st.write(r_cost or "-")
+with tab3:
+    st.write(r_imp or "-")
+with tab4:
+    st.write(r_risk or "-")
+
+# Assumptions bullets
+if assumptions:
+    st.markdown("#### Assumptions")
+    st.write("\n".join([f"- {a}" for a in assumptions]))
 
     with tab_dash:
         st.subheader("Dashboard")
@@ -266,10 +291,46 @@ def main():
             with colD:
                 st.metric("Revise / No-Go", int((df["recommendation"].isin(["Revise","No-Go"])).sum()))
 
-            st.dataframe(
-                df[["id","submitted_on","title","submitted_by","feasibility","cost","impact","risk","weighted_score","recommendation","summary"]].sort_values("submitted_on", ascending=False),
-                use_container_width=True
-            )
+          # Prepare friendly columns
+show_df = df[[
+    "id","submitted_on","title","submitted_by",
+    "feasibility","cost","impact","risk",
+    "weighted_score","recommendation","summary"
+]].sort_values("submitted_on", ascending=False).rename(columns={
+    "submitted_on": "Submitted",
+    "title": "Idea",
+    "submitted_by": "By",
+    "feasibility": "Feasibility",
+    "cost": "Cost (1-5 high=bad)",
+    "impact": "Impact",
+    "risk": "Risk (1-5 high=bad)",
+    "weighted_score": "Weighted Score",
+    "recommendation": "AI Rec",
+})
+
+st.caption("Legend: ✅ Go   ✏️ Revise   ⛔ No-Go")
+
+st.dataframe(
+    show_df,
+    use_container_width=True,
+    column_config={
+        "Feasibility": st.column_config.NumberColumn(format="%.0f", help="1–5 (higher=better)"),
+        "Impact": st.column_config.NumberColumn(format="%.0f", help="1–5 (higher=better)"),
+        "Cost (1-5 high=bad)": st.column_config.NumberColumn(format="%.0f", help="1–5 (lower=better)"),
+        "Risk (1-5 high=bad)": st.column_config.NumberColumn(format="%.0f", help="1–5 (lower=better)"),
+        "Weighted Score": st.column_config.ProgressColumn(
+            "Weighted Score",
+            help="0–100 (higher=better)",
+            min_value=0, max_value=100
+        ),
+        "AI Rec": st.column_config.TextColumn(
+            "AI Rec",
+            help="Go / Revise / No-Go"
+        ),
+        "summary": st.column_config.TextColumn("Summary", width="large"),
+    }
+)
+
             st.download_button(
                 "Download as CSV",
                 data=df.to_csv(index=False).encode("utf-8"),
