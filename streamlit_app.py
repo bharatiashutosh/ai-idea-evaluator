@@ -4,7 +4,7 @@ import json
 from datetime import datetime
 import pandas as pd
 
-# ---------- Config ----------
+# ---------- App Config ----------
 st.set_page_config(page_title="AI Idea Evaluator", page_icon="💡", layout="wide")
 
 # ---------- DB Helpers ----------
@@ -80,10 +80,10 @@ def fetch_records(conn, where_clause="", params=()):
     df = pd.read_sql_query(query, conn, params=params)
     return df
 
-# ---------- OpenAI ----------
+# ---------- OpenAI Call with Retries ----------
 def call_openai_idea_eval(payload_text):
     from openai import OpenAI
-    import os
+    import os, time
 
     api_key = st.secrets.get("OPENAI_API_KEY") or os.environ.get("OPENAI_API_KEY")
     if not api_key:
@@ -122,26 +122,33 @@ Output JSON Schema:
 
     user_prompt = payload_text
 
-    resp = client.chat.completions.create(
-        model="gpt-4o-mini",
-        temperature=0.2,
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt}
-        ]
-    )
-    content = resp.choices[0].message.content
-    # Ensure we only parse JSON (some models may add backticks)
-    content = content.strip().strip("`")
-    if content.startswith("json"):
-        content = content[4:].strip()
-    try:
-        data = json.loads(content)
-    except Exception as e:
-        raise RuntimeError(f"Failed to parse JSON from model: {e}\nRaw content: {content[:500]}")
-    return data
+    # Retry with exponential backoff for rate limits/transients
+    last_err = None
+    for attempt in range(5):  # up to 5 tries
+        try:
+            resp = client.chat.completions.create(
+                model="gpt-4o-mini",
+                temperature=0.2,
+                max_tokens=500,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+            )
+            content = resp.choices[0].message.content
+            content = content.strip().strip("`")
+            if content.startswith("json"):
+                content = content[4:].strip()
+            return json.loads(content)
+        except Exception as e:
+            last_err = e
+            wait = min(2 ** attempt, 8)  # 1,2,4,8,8 seconds
+            st.info(f"Rate limit or transient error. Retrying in {wait}s (attempt {attempt+1}/5)…")
+            time.sleep(wait)
 
-# ---------- UI ----------
+    raise RuntimeError(f"OpenAI call failed after retries: {last_err}")
+
+# ---------- Helpers ----------
 def idea_packet_text(title, problem, target_users, success_metric, dependencies, compliance_notes):
     return f"""IDEA PACKET:
 Title: {title}
@@ -151,12 +158,14 @@ Success Metric: {success_metric}
 Dependencies/Constraints: {dependencies}
 Compliance/Safety Notes: {compliance_notes}"""
 
+# ---------- UI ----------
 def main():
     conn = init_db()
 
     st.title("💡 AI Idea Evaluator")
     tab_submit, tab_dash = st.tabs(["Submit Idea", "Dashboard"])
 
+    # ---- Submit Idea Tab ----
     with tab_submit:
         st.subheader("Submit a new idea")
         with st.form("idea_form", clear_on_submit=False):
@@ -181,6 +190,7 @@ def main():
                 payload = idea_packet_text(title, problem, target_users, success_metric, dependencies, compliance_notes)
                 with st.spinner("Scoring your idea with AI..."):
                     data = call_openai_idea_eval(payload)
+
                 # Extract fields
                 feasibility = int(data.get("feasibility", 3))
                 cost = int(data.get("cost", 3))
@@ -221,53 +231,55 @@ def main():
                     "weighted_score": weighted
                 }
                 insert_record(conn, record)
-          st.success("Idea evaluated and saved.")
 
-# --- Pretty result summary ---
-rec_color = {"Go": "green", "Revise": "orange", "No-Go": "red"}.get(recommendation, "gray")
-rec_emoji = {"Go": "✅", "Revise": "✏️", "No-Go": "⛔"}.get(recommendation, "ℹ️")
+                # ---- Pretty Result Panel ----
+                st.success("Idea evaluated and saved.")
 
-st.markdown(f"### {rec_emoji} Recommendation: <span style='color:{rec_color}'>{recommendation}</span>", unsafe_allow_html=True)
-st.write(summary)
+                rec_color = {"Go": "green", "Revise": "orange", "No-Go": "red"}.get(recommendation, "gray")
+                rec_emoji = {"Go": "✅", "Revise": "✏️", "No-Go": "⛔"}.get(recommendation, "ℹ️")
 
-colA, colB, colC = st.columns(3)
-with colA:
-    st.metric("Weighted Score", weighted)
-with colB:
-    st.metric("Confidence", f"{confidence}%")
-with colC:
-    st.metric("Risk (1–5, lower better)", risk)
+                st.markdown(
+                    f"### {rec_emoji} Recommendation: <span style='color:{rec_color}'>{recommendation}</span>",
+                    unsafe_allow_html=True
+                )
+                st.write(summary)
 
-# Score bars
-st.markdown("#### Scores")
-sb1, sb2 = st.columns(2)
-with sb1:
-    st.write("Feasibility")
-    st.progress(feasibility/5.0)
-    st.write("Impact")
-    st.progress(impact/5.0)
-with sb2:
-    st.write("Cost (lower is better)")
-    st.progress((6-cost)/5.0)  # inverted so higher bar = better
-    st.write("Risk (lower is better)")
-    st.progress((6-risk)/5.0)  # inverted
+                colA, colB, colC = st.columns(3)
+                with colA:
+                    st.metric("Weighted Score", weighted)
+                with colB:
+                    st.metric("Confidence", f"{confidence}%")
+                with colC:
+                    st.metric("Risk (1–5, lower better)", risk)
 
-# Rationales in tabs
-tab1, tab2, tab3, tab4 = st.tabs(["Feasibility", "Cost", "Impact", "Risk"])
-with tab1:
-    st.write(r_feas or "-")
-with tab2:
-    st.write(r_cost or "-")
-with tab3:
-    st.write(r_imp or "-")
-with tab4:
-    st.write(r_risk or "-")
+                st.markdown("#### Scores")
+                sb1, sb2 = st.columns(2)
+                with sb1:
+                    st.write("Feasibility")
+                    st.progress(feasibility/5.0)
+                    st.write("Impact")
+                    st.progress(impact/5.0)
+                with sb2:
+                    st.write("Cost (lower is better)")
+                    st.progress((6-cost)/5.0)  # inverted so higher bar = better
+                    st.write("Risk (lower is better)")
+                    st.progress((6-risk)/5.0)  # inverted
 
-# Assumptions bullets
-if assumptions:
-    st.markdown("#### Assumptions")
-    st.write("\n".join([f"- {a}" for a in assumptions]))
+                tab1, tab2, tab3, tab4 = st.tabs(["Feasibility", "Cost", "Impact", "Risk"])
+                with tab1:
+                    st.write(r_feas or "-")
+                with tab2:
+                    st.write(r_cost or "-")
+                with tab3:
+                    st.write(r_imp or "-")
+                with tab4:
+                    st.write(r_risk or "-")
 
+                if assumptions:
+                    st.markdown("#### Assumptions")
+                    st.write("\n".join([f"- {a}" for a in assumptions]))
+
+    # ---- Dashboard Tab ----
     with tab_dash:
         st.subheader("Dashboard")
         recs = ["All", "Go", "Revise", "No-Go"]
@@ -279,7 +291,6 @@ if assumptions:
             params = (rec_filter,)
         df = fetch_records(conn, where, params)
 
-        # Compute basic stats
         if not df.empty:
             colA, colB, colC, colD = st.columns(4)
             with colA:
@@ -291,49 +302,50 @@ if assumptions:
             with colD:
                 st.metric("Revise / No-Go", int((df["recommendation"].isin(["Revise","No-Go"])).sum()))
 
-          # Prepare friendly columns
-show_df = df[[
-    "id","submitted_on","title","submitted_by",
-    "feasibility","cost","impact","risk",
-    "weighted_score","recommendation","summary"
-]].sort_values("submitted_on", ascending=False).rename(columns={
-    "submitted_on": "Submitted",
-    "title": "Idea",
-    "submitted_by": "By",
-    "feasibility": "Feasibility",
-    "cost": "Cost (1-5 high=bad)",
-    "impact": "Impact",
-    "risk": "Risk (1-5 high=bad)",
-    "weighted_score": "Weighted Score",
-    "recommendation": "AI Rec",
-})
+            # Prepare friendly columns
+            show_df = df[[
+                "id","submitted_on","title","submitted_by",
+                "feasibility","cost","impact","risk",
+                "weighted_score","recommendation","summary"
+            ]].sort_values("submitted_on", ascending=False).rename(columns={
+                "submitted_on": "Submitted",
+                "title": "Idea",
+                "submitted_by": "By",
+                "feasibility": "Feasibility",
+                "cost": "Cost (1-5 high=bad)",
+                "impact": "Impact",
+                "risk": "Risk (1-5 high=bad)",
+                "weighted_score": "Weighted Score",
+                "recommendation": "AI Rec",
+                "summary": "Summary"
+            })
 
-st.caption("Legend: ✅ Go   ✏️ Revise   ⛔ No-Go")
+            st.caption("Legend: ✅ Go   ✏️ Revise   ⛔ No-Go")
 
-st.dataframe(
-    show_df,
-    use_container_width=True,
-    column_config={
-        "Feasibility": st.column_config.NumberColumn(format="%.0f", help="1–5 (higher=better)"),
-        "Impact": st.column_config.NumberColumn(format="%.0f", help="1–5 (higher=better)"),
-        "Cost (1-5 high=bad)": st.column_config.NumberColumn(format="%.0f", help="1–5 (lower=better)"),
-        "Risk (1-5 high=bad)": st.column_config.NumberColumn(format="%.0f", help="1–5 (lower=better)"),
-        "Weighted Score": st.column_config.ProgressColumn(
-            "Weighted Score",
-            help="0–100 (higher=better)",
-            min_value=0, max_value=100
-        ),
-        "AI Rec": st.column_config.TextColumn(
-            "AI Rec",
-            help="Go / Revise / No-Go"
-        ),
-        "summary": st.column_config.TextColumn("Summary", width="large"),
-    }
-)
+            st.dataframe(
+                show_df,
+                use_container_width=True,
+                column_config={
+                    "Feasibility": st.column_config.NumberColumn(format="%.0f", help="1–5 (higher=better)"),
+                    "Impact": st.column_config.NumberColumn(format="%.0f", help="1–5 (higher=better)"),
+                    "Cost (1-5 high=bad)": st.column_config.NumberColumn(format="%.0f", help="1–5 (lower=better)"),
+                    "Risk (1-5 high=bad)": st.column_config.NumberColumn(format="%.0f", help="1–5 (lower=better)"),
+                    "Weighted Score": st.column_config.ProgressColumn(
+                        "Weighted Score",
+                        help="0–100 (higher=better)",
+                        min_value=0, max_value=100
+                    ),
+                    "AI Rec": st.column_config.TextColumn(
+                        "AI Rec",
+                        help="Go / Revise / No-Go"
+                    ),
+                    "Summary": st.column_config.TextColumn("Summary", width="large"),
+                }
+            )
 
             st.download_button(
                 "Download as CSV",
-                data=df.to_csv(index=False).encode("utf-8"),
+                data=show_df.to_csv(index=False).encode("utf-8"),
                 file_name="ideas_export.csv",
                 mime="text/csv"
             )
