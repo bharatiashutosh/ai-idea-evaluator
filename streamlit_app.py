@@ -43,7 +43,6 @@ def init_db():
     return conn
 
 def compute_weighted_score(feasibility, cost, impact, risk):
-    # Invert cost and risk (1=low, 5=high -> higher is worse)
     cost_inv = 6 - cost
     risk_inv = 6 - risk
     weighted = 100 * (
@@ -80,7 +79,7 @@ def fetch_records(conn, where_clause="", params=()):
     df = pd.read_sql_query(query, conn, params=params)
     return df
 
-# ---------- OpenAI Call with Retries ----------
+# ---------- OpenAI Call ----------
 def call_openai_idea_eval(payload_text):
     from openai import OpenAI
     import os, time
@@ -95,7 +94,6 @@ def call_openai_idea_eval(payload_text):
     system_prompt = """You are an Idea Evaluation assistant for a PMO. 
 Score new ideas on Feasibility, Cost, Impact, and Risk using the rubric below.
 Return STRICT JSON that matches the provided schema. Never include extra text outside JSON.
-Calibrate to be consistent across submissions.
 Gates: If compliance/safety/privacy is a concern with no mitigation, set recommendation to "No-Go".
 Rubric:
 - Feasibility (1-5): 1=major unknowns; 3=known tech w/ gaps; 5=proven approach, clear owner
@@ -122,9 +120,8 @@ Output JSON Schema:
 
     user_prompt = payload_text
 
-    # Retry with exponential backoff for rate limits/transients
     last_err = None
-    for attempt in range(5):  # up to 5 tries
+    for attempt in range(5):
         try:
             resp = client.chat.completions.create(
                 model="gpt-4o-mini",
@@ -135,17 +132,15 @@ Output JSON Schema:
                     {"role": "user", "content": user_prompt},
                 ],
             )
-            content = resp.choices[0].message.content
-            content = content.strip().strip("`")
+            content = resp.choices[0].message.content.strip().strip("`")
             if content.startswith("json"):
                 content = content[4:].strip()
             return json.loads(content)
         except Exception as e:
             last_err = e
-            wait = min(2 ** attempt, 8)  # 1,2,4,8,8 seconds
-            st.info(f"Rate limit or transient error. Retrying in {wait}s (attempt {attempt+1}/5)…")
+            wait = min(2 ** attempt, 8)
+            st.info(f"Retrying in {wait}s…")
             time.sleep(wait)
-
     raise RuntimeError(f"OpenAI call failed after retries: {last_err}")
 
 # ---------- Helpers ----------
@@ -165,7 +160,7 @@ def main():
     st.title("💡 AI Idea Evaluator")
     tab_submit, tab_dash = st.tabs(["Submit Idea", "Dashboard"])
 
-    # ---- Submit Idea Tab ----
+    # ---- Submit Idea ----
     with tab_submit:
         st.subheader("Submit a new idea")
         with st.form("idea_form", clear_on_submit=False):
@@ -191,7 +186,6 @@ def main():
                 with st.spinner("Scoring your idea with AI..."):
                     data = call_openai_idea_eval(payload)
 
-                # Extract fields
                 feasibility = int(data.get("feasibility", 3))
                 cost = int(data.get("cost", 3))
                 impact = int(data.get("impact", 3))
@@ -246,7 +240,7 @@ def main():
 
                 colA, colB, colC = st.columns(3)
                 with colA:
-                    st.metric("Weighted Score", weighted)
+                    st.metric("Weighted Score", f"{weighted}%")
                 with colB:
                     st.metric("Confidence", f"{confidence}%")
                 with colC:
@@ -261,9 +255,9 @@ def main():
                     st.progress(impact/5.0)
                 with sb2:
                     st.write("Cost (lower is better)")
-                    st.progress((6-cost)/5.0)  # inverted so higher bar = better
+                    st.progress((6-cost)/5.0)
                     st.write("Risk (lower is better)")
-                    st.progress((6-risk)/5.0)  # inverted
+                    st.progress((6-risk)/5.0)
 
                 tab1, tab2, tab3, tab4 = st.tabs(["Feasibility", "Cost", "Impact", "Risk"])
                 with tab1:
@@ -279,13 +273,12 @@ def main():
                     st.markdown("#### Assumptions")
                     st.write("\n".join([f"- {a}" for a in assumptions]))
 
-    # ---- Dashboard Tab ----
+    # ---- Dashboard ----
     with tab_dash:
         st.subheader("Dashboard")
         recs = ["All", "Go", "Revise", "No-Go"]
         rec_filter = st.selectbox("Filter by AI Recommendation", recs, index=0)
-        where = ""
-        params = ()
+        where, params = "", ()
         if rec_filter != "All":
             where = "recommendation = ?"
             params = (rec_filter,)
@@ -296,13 +289,12 @@ def main():
             with colA:
                 st.metric("Total Ideas", len(df))
             with colB:
-                st.metric("Avg Weighted Score", round(df["weighted_score"].mean(), 1))
+                st.metric("Avg Weighted Score", f"{round(df['weighted_score'].mean(),1)}%")
             with colC:
                 st.metric("Go", int((df["recommendation"]=="Go").sum()))
             with colD:
                 st.metric("Revise / No-Go", int((df["recommendation"].isin(["Revise","No-Go"])).sum()))
 
-            # Prepare friendly columns
             show_df = df[[
                 "id","submitted_on","title","submitted_by",
                 "feasibility","cost","impact","risk",
@@ -317,31 +309,31 @@ def main():
                 "risk": "Risk (1-5 high=bad)",
                 "weighted_score": "Weighted Score",
                 "recommendation": "AI Rec",
-                "summary": "Summary"
+                "summary": "Summary",
             })
+
+            # Add percent column
+            show_df["Weighted %"] = show_df["Weighted Score"].round().astype(int)
 
             st.caption("Legend: ✅ Go   ✏️ Revise   ⛔ No-Go")
 
             st.dataframe(
-                show_df,
+                show_df[[
+                    "Submitted","Idea","By",
+                    "Feasibility","Impact","Cost (1-5 high=bad)","Risk (1-5 high=bad)",
+                    "Weighted Score","Weighted %","AI Rec","Summary"
+                ]],
                 use_container_width=True,
                 column_config={
-                    "Feasibility": st.column_config.NumberColumn(format="%.0f", help="1–5 (higher=better)"),
-                    "Impact": st.column_config.NumberColumn(format="%.0f", help="1–5 (higher=better)"),
-                    "Cost (1-5 high=bad)": st.column_config.NumberColumn(format="%.0f", help="1–5 (lower=better)"),
-                    "Risk (1-5 high=bad)": st.column_config.NumberColumn(format="%.0f", help="1–5 (lower=better)"),
+                    "Feasibility": st.column_config.NumberColumn(format="%.0f"),
+                    "Impact": st.column_config.NumberColumn(format="%.0f"),
+                    "Cost (1-5 high=bad)": st.column_config.NumberColumn(format="%.0f"),
+                    "Risk (1-5 high=bad)": st.column_config.NumberColumn(format="%.0f"),
                     "Weighted Score": st.column_config.ProgressColumn(
-                      "Weighted Score": st.column_config.ProgressColumn(
-    "Weighted Score",
-    help="0–100 (higher=better)",
-    min_value=0, max_value=100,
-    format="%d%%"
-),
-
-                    "AI Rec": st.column_config.TextColumn(
-                        "AI Rec",
-                        help="Go / Revise / No-Go"
+                        "Weighted Score", min_value=0, max_value=100
                     ),
+                    "Weighted %": st.column_config.NumberColumn(format="%d%%"),
+                    "AI Rec": st.column_config.TextColumn("AI Rec"),
                     "Summary": st.column_config.TextColumn("Summary", width="large"),
                 }
             )
