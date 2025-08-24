@@ -7,6 +7,9 @@ import pandas as pd
 # ---------- App Config ----------
 st.set_page_config(page_title="AI Idea Evaluator", page_icon="💡", layout="wide")
 
+# ---------- Model Config ----------
+MODEL_NAME = "gpt-4o"  # For exec demos. Switch to "gpt-4o-mini" for cheaper daily runs.
+
 # ---------- DB Helpers ----------
 DB_PATH = "data.db"
 
@@ -43,6 +46,7 @@ def init_db():
     return conn
 
 def compute_weighted_score(feasibility, cost, impact, risk):
+    # Invert Cost/Risk (1=low,5=high) so higher is better after inversion
     cost_inv = 6 - cost
     risk_inv = 6 - risk
     weighted = 100 * (
@@ -79,7 +83,25 @@ def fetch_records(conn, where_clause="", params=()):
     df = pd.read_sql_query(query, conn, params=params)
     return df
 
-# ---------- OpenAI Call ----------
+# ---------- Robust JSON parsing ----------
+def _parse_json_strict_or_best_effort(text: str):
+    """
+    Try strict json.loads; if it fails, extract first {...} block and parse.
+    """
+    try:
+        return json.loads(text)
+    except Exception:
+        pass
+    # Best-effort: find first '{' and last '}' and parse that slice
+    start = text.find("{")
+    end = text.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        snippet = text[start:end+1]
+        return json.loads(snippet)
+    # Give up with a readable error
+    raise ValueError("Failed to parse JSON from model output.")
+
+# ---------- OpenAI Call (JSON mode w/ fallback + retries) ----------
 def call_openai_idea_eval(payload_text):
     from openai import OpenAI
     import os, time
@@ -91,15 +113,17 @@ def call_openai_idea_eval(payload_text):
 
     client = OpenAI(api_key=api_key)
 
-    system_prompt = """You are an Idea Evaluation assistant for a PMO. 
+    system_prompt = """You are an Idea Evaluation assistant for a PMO.
 Score new ideas on Feasibility, Cost, Impact, and Risk using the rubric below.
-Return STRICT JSON that matches the provided schema. Never include extra text outside JSON.
-Gates: If compliance/safety/privacy is a concern with no mitigation, set recommendation to "No-Go".
+Return STRICT JSON matching the schema. Never include extra text outside JSON.
+If compliance/safety/privacy risks lack mitigation, set recommendation to "No-Go".
+
 Rubric:
 - Feasibility (1-5): 1=major unknowns; 3=known tech w/ gaps; 5=proven approach, clear owner
 - Cost (1-5; higher=more expensive): 1=minimal; 3=moderate; 5=significant budget/vendor
 - Impact (1-5): 1=limited; 3=dept-level benefit; 5=org-level, measurable KPIs
 - Risk (1-5; higher=more risk): 1=low; 3=some risk w/ mitigations; 5=high (safety, regulatory, security, reputation)
+
 Output JSON Schema:
 {
   "feasibility": 1-5 integer,
@@ -123,24 +147,42 @@ Output JSON Schema:
     last_err = None
     for attempt in range(5):
         try:
+            # First try: JSON mode (response_format)
             resp = client.chat.completions.create(
-                model="gpt-4o-mini",
-                temperature=0.2,
+                model=MODEL_NAME,
+                temperature=0.1,
                 max_tokens=500,
+                response_format={"type": "json_object"},
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt},
                 ],
             )
             content = resp.choices[0].message.content.strip().strip("`")
-            if content.startswith("json"):
-                content = content[4:].strip()
-            return json.loads(content)
-        except Exception as e:
-            last_err = e
-            wait = min(2 ** attempt, 8)
-            st.info(f"Retrying in {wait}s…")
-            time.sleep(wait)
+            return _parse_json_strict_or_best_effort(content)
+        except Exception as e1:
+            last_err = e1
+            # Second try: without response_format (some accounts/models may not support it)
+            try:
+                resp2 = client.chat.completions.create(
+                    model=MODEL_NAME,
+                    temperature=0.1,
+                    max_tokens=500,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                )
+                content2 = resp2.choices[0].message.content.strip().strip("`")
+                if content2.startswith("json"):
+                    content2 = content2[4:].strip()
+                return _parse_json_strict_or_best_effort(content2)
+            except Exception as e2:
+                last_err = e2
+                wait = min(2 ** attempt, 8)  # 1,2,4,8,8
+                st.info(f"Model retry in {wait}s (attempt {attempt+1}/5)…")
+                time.sleep(wait)
+
     raise RuntimeError(f"OpenAI call failed after retries: {last_err}")
 
 # ---------- Helpers ----------
@@ -186,6 +228,7 @@ def main():
                 with st.spinner("Scoring your idea with AI..."):
                     data = call_openai_idea_eval(payload)
 
+                # Extract
                 feasibility = int(data.get("feasibility", 3))
                 cost = int(data.get("cost", 3))
                 impact = int(data.get("impact", 3))
@@ -333,7 +376,7 @@ def main():
                     "Weighted Score": st.column_config.ProgressColumn(
                         "Weighted Score", min_value=0, max_value=100
                     ),
-                    # Weighted % shown as plain text to avoid any auto-scaling quirks
+                    # Force as text so it's always '72%'
                     "Weighted %": st.column_config.TextColumn("Weighted %"),
                     "AI Rec": st.column_config.TextColumn("AI Rec"),
                     "Summary": st.column_config.TextColumn("Summary", width="large"),
